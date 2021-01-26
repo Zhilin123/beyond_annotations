@@ -3,7 +3,6 @@
 
 import torch
 import numpy as np
-import pandas as pd
 from pytorch_pretrained_bert import BertTokenizer, BertModel, BertForMaskedLM,BertForNextSentencePrediction, BertForSequenceClassification
 import json
 import time
