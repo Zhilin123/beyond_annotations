@@ -1,4 +1,6 @@
-## Beyond annotations: labelling text based on social signals in ecological settings
+## Beyond annotations: labelling empathy in text from the perspective of the listener
+
+[Paper](https://github.com/Zhilin123/Publications/blob/master/empathy.pdf)
 
 This code is an example of how text can be labelled automatically based on social signals revealed in interpersonal communication.
 
