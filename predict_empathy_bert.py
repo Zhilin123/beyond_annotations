@@ -24,9 +24,9 @@ model.to(device)
 
 model.eval()
 
-filename1 = data_dir+"helpful_comments.json" 
+filename1 = data_dir+"helpful_comments.json"
 filename2 = data_dir+"unhelpful_comments.json"
-    
+
 with open(filename1, "r") as read_file:
     helpful_comments = json.load(read_file)
 with open(filename2, "r") as read_file:
@@ -61,33 +61,46 @@ for i in tqdm(range(len(new_text))):
     attention_masks.append(input_mask)
 
 
-test_size = 0.1
+val_test_size = 0.2 # 0.1 for val and 0.1 for test
 
 #split train-test
-train_inputs, validation_inputs, train_labels, validation_labels = train_test_split(input_ids, new_score, 
-                                                            random_state=42, test_size=test_size)
-train_masks, validation_masks, _, _ = train_test_split(attention_masks, input_ids,
-                                             random_state=42, test_size=test_size)
-train_segment_ids, validation_segment_ids, _, _ = train_test_split(segment_ids, input_ids,
-                                             random_state=42, test_size=test_size)
+train_inputs, validation_test_inputs, train_labels, validation_test_labels = train_test_split(input_ids, new_score,
+                                                            random_state=42, test_size=val_test_size)
+train_masks, validation_test_masks, _, _ = train_test_split(attention_masks, input_ids,
+                                             random_state=42, test_size=val_test_size)
+train_segment_ids, validation_test_segment_ids, _, _ = train_test_split(segment_ids, input_ids,
+                                             random_state=42, test_size=val_test_size)
+
+
+test_inputs, validation_inputs, test_labels, validation_labels = train_test_split(validation_test_inputs, validation_test_labels,
+                                                            random_state=42, test_size=0.5)
+test_masks, validation_masks, _, _ = train_test_split(validation_test_masks, validation_test_inputs,
+                                             random_state=42, test_size=0.5)
+test_segment_ids, validation_segment_ids, _, _ = train_test_split(validation_test_segment_ids, validation_test_inputs,
+                                             random_state=42, test_size=0.5)
+
+
 
 #convert data to tensors
 
 train_inputs = torch.tensor(train_inputs)
-validation_inputs = torch.tensor(validation_inputs)
 train_labels = torch.tensor(train_labels)
-validation_labels = torch.tensor(validation_labels)
 train_masks = torch.tensor(train_masks)
-validation_masks = torch.tensor(validation_masks)
 train_segment_ids = torch.tensor(train_segment_ids)
+
+validation_inputs = torch.tensor(validation_inputs)
+validation_labels = torch.tensor(validation_labels)
+validation_masks = torch.tensor(validation_masks)
 validation_segment_ids = torch.tensor(validation_segment_ids)
 
+test_inputs = torch.tensor(test_inputs)
+test_labels = torch.tensor(test_labels)
+test_masks = torch.tensor(test_masks)
+test_segment_ids = torch.tensor(test_segment_ids)
+
 n_gpu = 1
-# Select a batch size for training. For fine-tuning BERT on a specific task, the authors recommend a batch size of 16 or 32
 batch_size = n_gpu * 8
 
-# Create an iterator of our data with torch DataLoader. This helps save on memory during training because, unlike a for loop, 
-# with an iterator the entire dataset does not need to be loaded into memory
 
 train_data = TensorDataset(train_inputs, train_masks,train_segment_ids, train_labels)
 train_sampler = RandomSampler(train_data)
@@ -96,6 +109,10 @@ train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=batc
 validation_data = TensorDataset(validation_inputs, validation_masks,validation_segment_ids, validation_labels)
 validation_sampler = SequentialSampler(validation_data)
 validation_dataloader = DataLoader(validation_data, sampler=validation_sampler, batch_size=batch_size)
+
+test_data = TensorDataset(test_inputs, test_masks, test_segment_ids, test_labels)
+test_sampler = SequentialSampler(test_data)
+test_dataloader = DataLoader(test_data, sampler=test_sampler, batch_size=batch_size)
 
 
 # Function to calculate the accuracy of our predictions vs labels
@@ -110,7 +127,7 @@ model.train()
 
 if n_gpu > 1:
     model = torch.nn.DataParallel(model)
-    
+
 param_optimizer = list(model.named_parameters())
 no_decay = ['bias', 'gamma', 'beta']
 optimizer_grouped_parameters = [
@@ -122,10 +139,10 @@ optimizer_grouped_parameters = [
 
 # This variable contains all of the hyperparemeter information our training loop needs
 optimizer = BertAdam(optimizer_grouped_parameters,
-                     lr=2e-5,
+                     lr=2e-6,
                      warmup=.1)
 
-# Tracking variables 
+# Tracking variables
 eval_loss, eval_accuracy = 0, 0
 nb_eval_steps, nb_eval_examples = 0, 0
 
@@ -136,55 +153,53 @@ train_loss_set = []
 epochs = 2
 
 all_validation_f1 = []
-# Put model in evaluation mode to evaluate loss on the validation set
-model.eval()
 
-# Tracking variables 
-eval_loss, eval_accuracy = 0, 0
-nb_eval_steps, nb_eval_examples = 0, 0
+def eval_once(dataloader):
+    model.eval()
+    eval_loss, eval_accuracy = 0, 0
+    nb_eval_steps, nb_eval_examples = 0, 0
+    all_ground_truth = []
+    all_predicted = []
+    for batch in tqdm(dataloader, position=0, leave=True):
+        # Add batch to GPU
+        batch = tuple(t.to(device) for t in batch)
+        # Unpack the inputs from our dataloader
+        b_input_ids, b_input_mask, b_segment_id, b_labels = batch
+        # Telling the model not to compute or store gradients, saving memory and speeding up validation
+        with torch.no_grad():
+        # Forward pass, calculate logit predictions
+            logits = model(b_input_ids, token_type_ids=b_segment_id, attention_mask=b_input_mask)
+    
+            # Move logits and labels to CPU
+            logits = logits.detach().cpu().numpy()
+            label_ids = b_labels.to('cpu').numpy()
+    
+            all_ground_truth += list(label_ids.flatten())
+            all_predicted += list(np.argmax(logits, axis=1).flatten())
+    
+            tmp_eval_accuracy = flat_accuracy(logits, label_ids)
+    
+            eval_accuracy += tmp_eval_accuracy
+            nb_eval_steps += 1
+    
+    print("Validation Accuracy: {}".format(eval_accuracy/nb_eval_steps))
+    all_metrics = metrics.classification_report(all_ground_truth,all_predicted, output_dict= True)
+    print(all_metrics)
+    eval_f1 = all_metrics['weighted avg']['f1-score']
+    print("eval_f1: ", eval_f1)
+    all_validation_f1.append(eval_f1)
+    print("all_validation_f1: ", all_validation_f1)
 
-# Evaluate data for one epoch
+eval_once(validation_dataloader)
 
-all_ground_truth = []
-all_predicted = []
-for batch in tqdm(validation_dataloader):
-    # Add batch to GPU
-    batch = tuple(t.to(device) for t in batch)
-    # Unpack the inputs from our dataloader
-    b_input_ids, b_input_mask, b_segment_id, b_labels = batch
-    # Telling the model not to compute or store gradients, saving memory and speeding up validation
-    with torch.no_grad():
-    # Forward pass, calculate logit predictions
-        logits = model(b_input_ids, token_type_ids=b_segment_id, attention_mask=b_input_mask)
-
-        # Move logits and labels to CPU
-        logits = logits.detach().cpu().numpy()
-        label_ids = b_labels.to('cpu').numpy()
-
-        all_ground_truth += list(label_ids.flatten()) 
-        all_predicted += list(np.argmax(logits, axis=1).flatten())
-
-        tmp_eval_accuracy = flat_accuracy(logits, label_ids)
-
-        eval_accuracy += tmp_eval_accuracy
-        nb_eval_steps += 1
-
-print("Validation Accuracy: {}".format(eval_accuracy/nb_eval_steps))
-all_metrics = metrics.classification_report(all_ground_truth,all_predicted, output_dict= True)
-print(all_metrics)
-eval_f1 = all_metrics['weighted avg']['f1-score']
-print("eval_f1: ", eval_f1)
-all_validation_f1.append(eval_f1)
-print("all_validation_f1: ", all_validation_f1)
-# trange is a tqdm wrapper around the normal python range
 for _ in trange(epochs, desc="Epoch"):
     model.train()
     # Tracking variables
     tr_loss = 0
     nb_tr_examples, nb_tr_steps = 0, 0
-  
+
     # Train the data for one epoch
-    for step, batch in enumerate(tqdm(train_dataloader)):
+    for step, batch in enumerate(tqdm(train_dataloader, position=0, leave=True)):
         # Add batch to GPU
         batch = tuple(t.to(device) for t in batch)
         # Unpack the inputs from our dataloader
@@ -195,58 +210,21 @@ for _ in trange(epochs, desc="Epoch"):
         loss = model(b_input_ids, token_type_ids=b_segment_id, attention_mask=b_input_mask, labels=b_labels)
         if n_gpu > 1:
             loss = loss.mean() # mean() to average on multi-gpu parallel training
-        train_loss_set.append(loss.item())    
+        train_loss_set.append(loss.item())
         # Backward pass
         loss.backward()
         # Update parameters and take a step using the computed gradient
         optimizer.step()
-    
-    
+
+
         # Update tracking variables
         tr_loss += loss.item()
         nb_tr_examples += b_input_ids.size(0)
         nb_tr_steps += 1
 
     print("Train loss: {}".format(tr_loss/nb_tr_steps))
-  
-  
-    # Validation
-    model.eval()
 
-    # Tracking variables 
-    eval_loss, eval_accuracy = 0, 0
-    nb_eval_steps, nb_eval_examples = 0, 0
 
-    # Evaluate data for one epoch
-
-    all_ground_truth = []
-    all_predicted = []
-    for batch in tqdm(validation_dataloader):
-        # Add batch to GPU
-        batch = tuple(t.to(device) for t in batch)
-        # Unpack the inputs from our dataloader
-        b_input_ids, b_input_mask, b_segment_id, b_labels = batch
-        # Telling the model not to compute or store gradients, saving memory and speeding up validation
-        with torch.no_grad():
-            # Forward pass, calculate logit predictions
-            logits = model(b_input_ids, token_type_ids=b_segment_id, attention_mask=b_input_mask)
+    eval_once(validation_dataloader)
     
-        # Move logits and labels to CPU
-        logits = logits.detach().cpu().numpy()
-        label_ids = b_labels.to('cpu').numpy()
-
-        all_ground_truth += list(label_ids.flatten()) 
-        all_predicted += list(np.argmax(logits, axis=1).flatten())
-        tmp_eval_accuracy = flat_accuracy(logits, label_ids)
-    
-        eval_accuracy += tmp_eval_accuracy
-        nb_eval_steps += 1
-
-    print("Validation Accuracy: {}".format(eval_accuracy/nb_eval_steps))
-    all_metrics = metrics.classification_report(all_ground_truth,all_predicted, output_dict= True)
-    print(all_metrics)
-    eval_f1 = all_metrics['weighted avg']['f1-score']
-    print("eval_f1: ", eval_f1)
-    all_validation_f1.append(eval_f1)   
-    print("all_validation_f1: ", all_validation_f1)
-
+eval_once(test_dataloader)
